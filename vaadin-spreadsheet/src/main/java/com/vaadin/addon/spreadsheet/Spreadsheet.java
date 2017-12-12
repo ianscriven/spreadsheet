@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.EventObject;
 import java.util.HashMap;
@@ -45,23 +46,34 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.apache.poi.hssf.converter.AbstractExcelUtils;
+import org.apache.poi.hssf.usermodel.HSSFEvaluationWorkbook;
 import org.apache.poi.hssf.usermodel.HSSFSheet;
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.ss.SpreadsheetVersion;
+import org.apache.poi.ss.formula.FormulaParser;
+import org.apache.poi.ss.formula.FormulaParsingWorkbook;
+import org.apache.poi.ss.formula.FormulaType;
+import org.apache.poi.ss.formula.ptg.*;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellType;
 import org.apache.poi.ss.usermodel.Comment;
 import org.apache.poi.ss.usermodel.DataFormatter;
 import org.apache.poi.ss.usermodel.FormulaEvaluator;
 import org.apache.poi.ss.usermodel.Hyperlink;
+import org.apache.poi.ss.usermodel.Name;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.util.AreaReference;
 import org.apache.poi.ss.util.CellAddress;
 import org.apache.poi.ss.util.CellRangeAddress;
 import org.apache.poi.ss.util.CellRangeUtil;
 import org.apache.poi.ss.util.CellReference;
 import org.apache.poi.ss.util.PaneInformation;
 import org.apache.poi.ss.util.WorkbookUtil;
+import org.apache.poi.xssf.streaming.SXSSFEvaluationWorkbook;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
+import org.apache.poi.xssf.usermodel.XSSFEvaluationWorkbook;
 import org.apache.poi.xssf.usermodel.XSSFHyperlink;
 import org.apache.poi.xssf.usermodel.XSSFRow;
 import org.apache.poi.xssf.usermodel.XSSFSheet;
@@ -73,6 +85,8 @@ import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTCol;
 import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTCols;
 import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTWorksheet;
 
+import com.google.common.graph.GraphBuilder;
+import com.google.common.graph.MutableGraph;
 import com.vaadin.addon.spreadsheet.SheetOverlayWrapper.OverlayChangeListener;
 import com.vaadin.addon.spreadsheet.action.SpreadsheetDefaultActionHandler;
 import com.vaadin.addon.spreadsheet.client.MergedRegion;
@@ -123,6 +137,8 @@ public class Spreadsheet extends AbstractComponent implements HasComponents,
 
     private static final Logger LOGGER = Logger.getLogger(Spreadsheet.class
             .getName());
+
+    private MutableGraph<CellReference> dependencyGraph;
 
     /**
      * A common formula evaluator for this Spreadsheet
@@ -3021,6 +3037,136 @@ public class Spreadsheet extends AbstractComponent implements HasComponents,
                     "Cannot open a null workbook with Spreadsheet component.");
         }
         SpreadsheetFactory.reloadSpreadsheetComponent(this, workbook);
+        // build dependency graph
+        buildFormulaDependencyGraph();
+    }
+
+    private void buildFormulaDependencyGraph() {
+        dependencyGraph = GraphBuilder.directed().build();
+        Iterator<Sheet> sheetIterator = workbook.sheetIterator();
+        while (sheetIterator.hasNext()) {
+            Sheet sheet = sheetIterator.next();
+            Iterator<Row> rowIterator = sheet.rowIterator();
+            while (rowIterator.hasNext()) {
+                Row row = rowIterator.next();
+                Iterator<Cell> cellIterator = row.cellIterator();
+                while (cellIterator.hasNext()) {
+                    Cell cell = cellIterator.next();
+                    if (cell.getCellTypeEnum() == CellType.FORMULA) {
+                        CellReference cellReference =
+                            new CellReference(sheet.getSheetName(), cell.getRowIndex(), cell.getColumnIndex(), false,
+                                              false);
+                        Set<CellReference> references =
+                            getReferences(cell.getCellFormula(), sheet.getSheetName(), workbook.getSheetIndex(sheet),
+                                          cell.getRowIndex());
+                        references.forEach(ref -> {
+                            dependencyGraph.addNode(ref);
+                            dependencyGraph.putEdge(ref, cellReference);
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    private FormulaParsingWorkbook getFormulaParsingWorkbook() {
+        FormulaParsingWorkbook parsingWorkbook;
+        if (workbook instanceof XSSFWorkbook) {
+            parsingWorkbook = XSSFEvaluationWorkbook.create((XSSFWorkbook) workbook);
+        } else if (workbook instanceof HSSFWorkbook) {
+            parsingWorkbook = HSSFEvaluationWorkbook.create((HSSFWorkbook) workbook);
+        } else if (workbook instanceof SXSSFWorkbook) {
+            parsingWorkbook = SXSSFEvaluationWorkbook.create((SXSSFWorkbook) workbook);
+        } else {
+            throw new IllegalArgumentException("Unsupported workbook format");
+        }
+        return parsingWorkbook;
+    }
+
+    private Set<CellReference> getReferences(String formula, String sheetName, int sheetIndex, int rowIndex) {
+        Ptg[] ptgs = FormulaParser.parse(formula, getFormulaParsingWorkbook(), FormulaType.CELL, sheetIndex, rowIndex);
+        Set<CellReference> cellReferences = new HashSet<>();
+        for (Ptg ptg : ptgs) {
+            if (ptg instanceof RefPtgBase) {
+                cellReferences.add(generateCellReference((RefPtgBase) ptg, sheetName));
+            } else if (ptg instanceof AreaPtgBase) {
+                cellReferences.addAll(generateCellReferences((AreaPtgBase) ptg, sheetName));
+            } else if (ptg instanceof NamePtg) {
+                cellReferences.addAll(generateCellReferences((NamePtg) ptg));
+            }
+        }
+        return cellReferences;
+    }
+
+    private CellReference generateCellReference(RefPtgBase ptg, String sheetName) {
+        String cellRefSheetName = sheetName;
+        if (ptg instanceof Ref3DPxg) {
+            cellRefSheetName = ((Ref3DPxg) ptg).getSheetName();
+        }
+        return new CellReference(cellRefSheetName, ptg.getRow(), ptg.getColumn(), false, false);
+    }
+
+    private Set<CellReference> generateCellReferences(AreaPtgBase areaPtg, String sheetName) {
+        Set<CellReference> cellReferences = new HashSet<>();
+        String cellRefSheetName = sheetName;
+        if (areaPtg instanceof Area3DPxg) {
+            cellRefSheetName = ((Area3DPxg) areaPtg).getSheetName();
+        }
+        for (int row = areaPtg.getFirstRow(); row <= areaPtg.getLastRow(); row++) {
+            for (int col = areaPtg.getFirstColumn(); col <= areaPtg.getLastColumn(); col++) {
+                cellReferences.add(new CellReference(cellRefSheetName, row, col, false, false));
+            }
+        }
+        return cellReferences;
+    }
+
+    private Set<CellReference> generateCellReferences(NamePtg namePtg) {
+        Set<CellReference> cellReferences = new HashSet<>();
+        Name name = workbook.getNameAt(namePtg.getIndex());
+        if (name.isFunctionName()) {
+            return Collections.emptySet();
+        }
+        AreaReference areaReference = new AreaReference(name.getRefersToFormula(), SpreadsheetVersion.EXCEL2007);
+        for (CellReference cellReference : areaReference.getAllReferencedCells()) {
+            // re-create as non-absolute reference (or make them all absolute???)
+            cellReferences.add(
+                new CellReference(cellReference.getSheetName(), cellReference.getRow(), cellReference.getCol(),
+                                  false, false));
+        }
+        return cellReferences;
+    }
+
+    Set<CellReference> getAllDependants(CellReference node) {
+        return getAllDependants(node, new HashSet<>());
+    }
+
+    private Set<CellReference> getAllDependants(CellReference node, Set<CellReference> visitedNodes) {
+        if (visitedNodes.contains(node)) {
+            return Collections.emptySet();
+        }
+        visitedNodes.add(node);
+        Set<CellReference> dependants = new HashSet<>();
+        if (dependencyGraph.nodes().contains(node)) {
+            Set<CellReference> successors = dependencyGraph.successors(node);
+            successors.forEach(cellReference -> dependants.addAll(getAllDependants(cellReference, visitedNodes)));
+            dependants.addAll(successors);
+        }
+        return dependants;
+    }
+
+    void addFormulaCellToDependencyGraph(Cell cell) {
+        Sheet sheet = cell.getSheet();
+        String sheetName = cell.getSheet().getSheetName();
+        CellReference cellReference =
+            new CellReference(sheetName, cell.getRowIndex(), cell.getColumnIndex(), false, false);
+        // remove previous dependencies
+        dependencyGraph.removeNode(cellReference);
+        Set<CellReference> references =
+            getReferences(cell.getCellFormula(), sheetName, workbook.getSheetIndex(sheet), cell.getRowIndex());
+        references.forEach(ref -> {
+            dependencyGraph.addNode(ref);
+            dependencyGraph.putEdge(ref, cellReference);
+        });
     }
 
     /**

@@ -324,6 +324,7 @@ public class SpreadsheetHandlerImpl implements SpreadsheetServerRpc {
 
                 spreadsheet.getCellValueManager().markCellForUpdate(cell);
                 spreadsheet.getCellValueManager().getFormulaEvaluator().notifyUpdateCell(cell);
+                spreadsheet.getCellValueManager().markDependantCellsForUpdate(cell);
             }
         }
 

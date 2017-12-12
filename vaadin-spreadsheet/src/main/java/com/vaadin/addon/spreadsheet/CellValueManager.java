@@ -329,7 +329,7 @@ public class CellValueManager implements Serializable {
                     cellData.cellStyle = cellData.cellStyle + " cf" + i;
                 }
 
-                markedCells.add(SpreadsheetUtil.toKey(cell));
+                // markedCells.add(SpreadsheetUtil.toKey(cell));
             }
 
             if (cell.getCellTypeEnum() == CellType.NUMERIC
@@ -485,6 +485,9 @@ public class CellValueManager implements Serializable {
      *            Cell to mark for updates
      */
     protected void cellUpdated(Cell cell) {
+        if (cell.getCellTypeEnum() == CellType.FORMULA) {
+            spreadsheet.addFormulaCellToDependencyGraph(cell);
+        }
         getFormulaEvaluator().notifyUpdateCell(cell);
         markCellForUpdate(cell);
     }
@@ -525,6 +528,7 @@ public class CellValueManager implements Serializable {
         cd.row = cell.getRowIndex() + 1;
         removedCells.add(cd);
         clearCellCache(cellKey);
+        markDependantCellsForUpdate(cell);
     }
 
     /**
@@ -630,6 +634,7 @@ public class CellValueManager implements Serializable {
                         cell.setCellType(CellType.FORMULA);
                         cell.setCellFormula(newFormula);
                         getFormulaEvaluator().notifySetFormula(cell);
+                        spreadsheet.addFormulaCellToDependencyGraph(cell);
                         if (value.startsWith("=HYPERLINK(")
                                 && cell.getCellStyle().getIndex() != hyperlinkStyleIndex) {
                             // set the cell style to link cell
@@ -751,6 +756,18 @@ public class CellValueManager implements Serializable {
                                 + ")", exception);
             }
         }
+
+        // mark formula cells that depend on the updated cell to be updated
+        String activeSheetName = spreadsheet.getActiveSheet().getSheetName();
+        Set<CellReference> dependants = spreadsheet.getAllDependants(
+                new CellReference(activeSheetName, row - 1, col - 1, false, false));
+        dependants.forEach(cellReference -> {
+            if (activeSheetName.equals(cellReference.getSheetName())) {
+                markedCells.add(
+                        SpreadsheetUtil.toKey(cellReference.getCol() + 1,
+                        cellReference.getRow() + 1));
+            }
+        });
 
         spreadsheet.updateMarkedCells();
 
@@ -1189,6 +1206,10 @@ public class CellValueManager implements Serializable {
                 int columnIndex = cell.getColumnIndex();
                 final String key = SpreadsheetUtil.toKey(columnIndex + 1,
                         rowIndex + 1);
+                if (!markedCells.contains(key)) {
+                    // no need to update this cell, it won't have changed
+                    continue;
+                }
                 CellData cd = createCellDataForCell(cell);
                 // update formula cells
                 if (cell.getCellTypeEnum() == CellType.FORMULA) {
@@ -1322,6 +1343,7 @@ public class CellValueManager implements Serializable {
                         }
                         cell.setCellValue((String) null);
                         getFormulaEvaluator().notifyUpdateCell(cell);
+                        markDependantCellsForUpdate(cell);
                     }
                 }
             }
@@ -1375,8 +1397,21 @@ public class CellValueManager implements Serializable {
                 }
                 cell.setCellValue((String) null);
                 getFormulaEvaluator().notifyUpdateCell(cell);
+                markDependantCellsForUpdate(cell);
             }
         }
+    }
+
+    protected void markDependantCellsForUpdate(Cell cell) {
+        Sheet sheet = cell.getSheet();
+        CellReference cellReference =
+            new CellReference(sheet.getSheetName(), cell.getRowIndex(), cell.getColumnIndex(), false, false);
+        spreadsheet.getAllDependants(cellReference).forEach(dependentReference -> {
+            if (dependentReference.getSheetName().equals(sheet.getSheetName())) {
+                markedCells
+                    .add(SpreadsheetUtil.toKey(dependentReference.getCol() + 1, dependentReference.getRow() + 1));
+            }
+        });
     }
 
     /**
