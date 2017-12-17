@@ -237,9 +237,6 @@ public class CellValueManager implements Serializable {
                     } catch (RuntimeException rte) {
                         // Apache POI throws RuntimeExceptions for an invalid
                         // formula from POI model
-                        String formulaValue = cell.getCellFormula();
-                        cell.setCellType(CellType.STRING);
-                        cell.setCellValue(formulaValue);
                         spreadsheet.markInvalidFormula(
                                 cell.getColumnIndex() + 1,
                                 cell.getRowIndex() + 1);
