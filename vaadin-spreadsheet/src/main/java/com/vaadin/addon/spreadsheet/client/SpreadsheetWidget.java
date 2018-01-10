@@ -193,7 +193,9 @@ public class SpreadsheetWidget extends Composite implements SheetHandler,
 
     public SpreadsheetWidget() {
 
-        setTouchMode(TouchEvent.isSupported());
+        // disable touch mode for now, as it doesn't work properly on Chrome
+        setTouchMode(false);
+        //setTouchMode(TouchEvent.isSupported());
 
         sheetWidget = new SheetWidget(this, touchMode);
         formulaBarWidget = new FormulaBarWidget(this, sheetWidget);
